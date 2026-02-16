@@ -32,6 +32,15 @@ constexpr UINT kMenuOpenLogFile = 1003;
 constexpr UINT kMenuAcknowledgeAlert = 1004;
 constexpr UINT kMenuExit = 1005;
 constexpr UINT kMenuSetMonitorInterval = 1101;
+constexpr UINT_PTR kAcknowledgePopupTimerId = 3;
+constexpr UINT kDefaultAcknowledgePopupDurationMs = 2500;
+constexpr UINT kMinAcknowledgePopupDurationMs = 500;
+constexpr UINT kMaxAcknowledgePopupDurationMs = 30000;
+constexpr std::string_view kAlertKeyword = "\"logger\":";
+constexpr int kAcknowledgePopupWidth = 420;
+constexpr int kAcknowledgePopupHeight = 72;
+constexpr int kAcknowledgePopupOffsetPx = 8;
+constexpr wchar_t kAcknowledgePopupWindowClassName[] = L"BackrestWatcherAcknowledgePopupWindowClass";
 
 struct AppState {
   HWND hwnd = nullptr;
@@ -42,11 +51,13 @@ struct AppState {
   UINT monitorIntervalMs = kDefaultMonitorIntervalMs;
   bool hasAlert = false;
   bool blinkShowAlertIcon = true;
+  UINT acknowledgePopupDurationMs = kDefaultAcknowledgePopupDurationMs;
   NOTIFYICONDATAW trayIcon = {};
   HICON normalIcon = nullptr;
   HICON alertIcon = nullptr;
   bool ownsNormalIcon = false;
   bool trayIconAdded = false;
+  HWND acknowledgePopupHwnd = nullptr;
   HANDLE singleInstanceMutex = nullptr;
   UINT taskbarCreatedMessage = 0;
 };
@@ -82,16 +93,7 @@ std::wstring NormalIconPath() {
 }
 
 bool ContainsAlertKeyword(std::string_view text) {
-  std::string lowered;
-  lowered.reserve(text.size());
-  for (unsigned char ch : text) {
-    lowered.push_back(static_cast<char>(std::tolower(ch)));
-  }
-
-  return lowered.find("warning") != std::string::npos ||
-         lowered.find("\"level\":\"warn\"") != std::string::npos ||
-         lowered.find("error") != std::string::npos ||
-         lowered.find("\"level\":\"fatal\"") != std::string::npos;
+  return text.find(kAlertKeyword) != std::string_view::npos;
 }
 
 bool ScanFileRangeForAlerts(HANDLE file, ULONGLONG beginOffset, ULONGLONG endOffset) {
@@ -106,9 +108,10 @@ bool ScanFileRangeForAlerts(HANDLE file, ULONGLONG beginOffset, ULONGLONG endOff
   }
 
   constexpr DWORD kBufferSize = 64 * 1024;
+  constexpr size_t kOverlapSize = kAlertKeyword.size() > 0 ? (kAlertKeyword.size() - 1) : 0;
   char buffer[kBufferSize];
   std::string overlap;
-  overlap.reserve(16);
+  overlap.reserve(kOverlapSize);
 
   ULONGLONG remaining = endOffset - beginOffset;
   while (remaining > 0) {
@@ -130,8 +133,8 @@ bool ScanFileRangeForAlerts(HANDLE file, ULONGLONG beginOffset, ULONGLONG endOff
       return true;
     }
 
-    if (chunk.size() > 16) {
-      overlap.assign(chunk.end() - 16, chunk.end());
+    if (chunk.size() > kOverlapSize) {
+      overlap.assign(chunk.end() - static_cast<std::string::difference_type>(kOverlapSize), chunk.end());
     } else {
       overlap = chunk;
     }
@@ -153,6 +156,16 @@ UINT ClampMonitorInterval(UINT intervalMs) {
   return intervalMs;
 }
 
+UINT ClampAcknowledgePopupDuration(UINT durationMs) {
+  if (durationMs < kMinAcknowledgePopupDurationMs) {
+    return kMinAcknowledgePopupDurationMs;
+  }
+  if (durationMs > kMaxAcknowledgePopupDurationMs) {
+    return kMaxAcknowledgePopupDurationMs;
+  }
+  return durationMs;
+}
+
 void SaveMonitorIntervalToConfig(UINT intervalMs) {
   wchar_t intervalBuffer[32] = {};
   StringCchPrintfW(intervalBuffer, ARRAYSIZE(intervalBuffer), L"%u", intervalMs);
@@ -166,6 +179,58 @@ void LoadMonitorIntervalFromConfig() {
       kDefaultMonitorIntervalMs,
       g_state.configPath.c_str());
   g_state.monitorIntervalMs = ClampMonitorInterval(configuredInterval);
+}
+
+void SaveAcknowledgePopupDurationToConfig(UINT durationMs) {
+  const UINT clampedDurationMs = ClampAcknowledgePopupDuration(durationMs);
+  wchar_t durationBuffer[32] = {};
+  StringCchPrintfW(
+      durationBuffer,
+      ARRAYSIZE(durationBuffer),
+      L"%.3f",
+      static_cast<double>(clampedDurationMs) / 1000.0);
+  WritePrivateProfileStringW(L"watcher", L"ack_popup_seconds", durationBuffer, g_state.configPath.c_str());
+}
+
+void LoadAcknowledgePopupDurationFromConfig() {
+  wchar_t durationBuffer[64] = {};
+  const DWORD charsRead = GetPrivateProfileStringW(
+      L"watcher",
+      L"ack_popup_seconds",
+      L"",
+      durationBuffer,
+      static_cast<DWORD>(ARRAYSIZE(durationBuffer)),
+      g_state.configPath.c_str());
+
+  if (charsRead == 0) {
+    g_state.acknowledgePopupDurationMs = kDefaultAcknowledgePopupDurationMs;
+    SaveAcknowledgePopupDurationToConfig(g_state.acknowledgePopupDurationMs);
+    return;
+  }
+
+  wchar_t* parseEnd = nullptr;
+  const double durationSeconds = wcstod(durationBuffer, &parseEnd);
+  while (parseEnd != nullptr && *parseEnd != L'\0' && iswspace(*parseEnd) != 0) {
+    ++parseEnd;
+  }
+  if (!std::isfinite(durationSeconds) ||
+      durationSeconds < 0.0 ||
+      parseEnd == durationBuffer ||
+      (parseEnd != nullptr && *parseEnd != L'\0')) {
+    g_state.acknowledgePopupDurationMs = kDefaultAcknowledgePopupDurationMs;
+    SaveAcknowledgePopupDurationToConfig(g_state.acknowledgePopupDurationMs);
+    return;
+  }
+
+  const double minSeconds = static_cast<double>(kMinAcknowledgePopupDurationMs) / 1000.0;
+  const double maxSeconds = static_cast<double>(kMaxAcknowledgePopupDurationMs) / 1000.0;
+  const double clampedSeconds = (std::max)(minSeconds, (std::min)(durationSeconds, maxSeconds));
+  g_state.acknowledgePopupDurationMs = ClampAcknowledgePopupDuration(
+      static_cast<UINT>(std::llround(clampedSeconds * 1000.0)));
+
+  if (std::fabs(clampedSeconds - durationSeconds) > 0.0005) {
+    SaveAcknowledgePopupDurationToConfig(g_state.acknowledgePopupDurationMs);
+  }
 }
 
 void SaveAcknowledgedOffsetToConfig(ULONGLONG offset) {
@@ -208,6 +273,7 @@ void LoadLogPathFromConfig() {
   }
 
   LoadMonitorIntervalFromConfig();
+  LoadAcknowledgePopupDurationFromConfig();
   LoadAcknowledgedOffsetFromConfig();
 }
 
@@ -261,6 +327,149 @@ void UpdateTrayIcon() {
   if (!Shell_NotifyIconW(NIM_MODIFY, &g_state.trayIcon)) {
     AddTrayIcon();
   }
+}
+
+LRESULT CALLBACK AcknowledgePopupWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+  switch (message) {
+    case WM_CREATE:
+      SetTimer(hwnd, kAcknowledgePopupTimerId, g_state.acknowledgePopupDurationMs, nullptr);
+      return 0;
+
+    case WM_TIMER:
+      if (wParam == kAcknowledgePopupTimerId) {
+        DestroyWindow(hwnd);
+      }
+      return 0;
+
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+      DestroyWindow(hwnd);
+      return 0;
+
+    case WM_PAINT: {
+      PAINTSTRUCT paintStruct = {};
+      HDC dc = BeginPaint(hwnd, &paintStruct);
+      RECT clientRect = {};
+      GetClientRect(hwnd, &clientRect);
+
+      HBRUSH backgroundBrush = CreateSolidBrush(RGB(255, 249, 230));
+      FillRect(dc, &clientRect, backgroundBrush);
+      DeleteObject(backgroundBrush);
+
+      HPEN borderPen = CreatePen(PS_SOLID, 1, RGB(208, 186, 132));
+      HGDIOBJ oldPen = SelectObject(dc, borderPen);
+      HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+      Rectangle(dc, clientRect.left, clientRect.top, clientRect.right, clientRect.bottom);
+      SelectObject(dc, oldBrush);
+      SelectObject(dc, oldPen);
+      DeleteObject(borderPen);
+
+      RECT textRect = clientRect;
+      textRect.left += 10;
+      textRect.top += 8;
+      textRect.right -= 10;
+      textRect.bottom -= 8;
+      SetBkMode(dc, TRANSPARENT);
+      SetTextColor(dc, RGB(30, 30, 30));
+      DrawTextW(
+          dc,
+          L"Backrest Watcher\r\nAcknowledged. Monitoring continues from current log position.",
+          -1,
+          &textRect,
+          DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
+
+      EndPaint(hwnd, &paintStruct);
+      return 0;
+    }
+
+    case WM_DESTROY:
+      KillTimer(hwnd, kAcknowledgePopupTimerId);
+      if (g_state.acknowledgePopupHwnd == hwnd) {
+        g_state.acknowledgePopupHwnd = nullptr;
+      }
+      return 0;
+
+    default:
+      return DefWindowProcW(hwnd, message, wParam, lParam);
+  }
+}
+
+bool EnsureAcknowledgePopupWindowClassRegistered() {
+  static bool registered = false;
+  if (registered) {
+    return true;
+  }
+
+  WNDCLASSW popupClass = {};
+  popupClass.lpfnWndProc = AcknowledgePopupWindowProc;
+  popupClass.hInstance = GetModuleHandleW(nullptr);
+  popupClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+  popupClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_INFOBK + 1);
+  popupClass.lpszClassName = kAcknowledgePopupWindowClassName;
+
+  if (!RegisterClassW(&popupClass)) {
+    if (GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+      return false;
+    }
+  }
+
+  registered = true;
+  return true;
+}
+
+void ShowAcknowledgeNotification() {
+  if (!EnsureAcknowledgePopupWindowClassRegistered()) {
+    return;
+  }
+
+  if (g_state.acknowledgePopupHwnd && IsWindow(g_state.acknowledgePopupHwnd)) {
+    DestroyWindow(g_state.acknowledgePopupHwnd);
+    g_state.acknowledgePopupHwnd = nullptr;
+  }
+
+  POINT cursorPos = {};
+  if (!GetCursorPos(&cursorPos)) {
+    return;
+  }
+
+  RECT workArea = {0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+  MONITORINFO monitorInfo = {};
+  monitorInfo.cbSize = sizeof(monitorInfo);
+  HMONITOR monitor = MonitorFromPoint(cursorPos, MONITOR_DEFAULTTONEAREST);
+  if (monitor && GetMonitorInfoW(monitor, &monitorInfo)) {
+    workArea = monitorInfo.rcWork;
+  }
+
+  int popupX = cursorPos.x - (kAcknowledgePopupWidth / 2);
+  int popupY = cursorPos.y + kAcknowledgePopupOffsetPx;
+
+  if (popupY + kAcknowledgePopupHeight > workArea.bottom) {
+    popupY = cursorPos.y - kAcknowledgePopupHeight - kAcknowledgePopupOffsetPx;
+  }
+
+  popupX = std::max<int>(workArea.left, std::min<int>(popupX, workArea.right - kAcknowledgePopupWidth));
+  popupY = std::max<int>(workArea.top, std::min<int>(popupY, workArea.bottom - kAcknowledgePopupHeight));
+
+  HWND popupHwnd = CreateWindowExW(
+      WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+      kAcknowledgePopupWindowClassName,
+      L"",
+      WS_POPUP,
+      popupX,
+      popupY,
+      kAcknowledgePopupWidth,
+      kAcknowledgePopupHeight,
+      g_state.hwnd,
+      nullptr,
+      GetModuleHandleW(nullptr),
+      nullptr);
+  if (!popupHwnd) {
+    return;
+  }
+
+  g_state.acknowledgePopupHwnd = popupHwnd;
+  ShowWindow(popupHwnd, SW_SHOWNOACTIVATE);
+  UpdateWindow(popupHwnd);
 }
 
 void ResetWatcherAndRescan() {
@@ -384,6 +593,7 @@ void AcknowledgeAlert() {
   g_state.hasAlert = false;
   g_state.blinkShowAlertIcon = true;
   UpdateTrayIcon();
+  ShowAcknowledgeNotification();
 }
 
 void ApplyMonitorInterval() {
@@ -704,13 +914,16 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
       }
       return 0;
 
-    case kTrayMessage:
-      if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) {
+    case kTrayMessage: {
+      // For NOTIFYICON_VERSION_4, the event code is carried in LOWORD(lParam).
+      const UINT trayEvent = static_cast<UINT>(LOWORD(lParam));
+      if (trayEvent == WM_RBUTTONUP || trayEvent == WM_CONTEXTMENU || trayEvent == NIN_KEYSELECT) {
         ShowTrayContextMenu(hwnd);
-      } else if (lParam == WM_LBUTTONDBLCLK) {
-        OpenLogFile();
+      } else if (trayEvent == WM_LBUTTONDBLCLK) {
+        AcknowledgeAlert();
       }
       return 0;
+    }
 
     case WM_COMMAND: {
       switch (LOWORD(wParam)) {
@@ -740,6 +953,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
     case WM_DESTROY:
       KillTimer(hwnd, kMonitorTimerId);
       KillTimer(hwnd, kBlinkTimerId);
+      if (g_state.acknowledgePopupHwnd && IsWindow(g_state.acknowledgePopupHwnd)) {
+        DestroyWindow(g_state.acknowledgePopupHwnd);
+        g_state.acknowledgePopupHwnd = nullptr;
+      }
       if (g_state.trayIconAdded) {
         Shell_NotifyIconW(NIM_DELETE, &g_state.trayIcon);
         g_state.trayIconAdded = false;
