@@ -9,7 +9,7 @@ Backrest Watcher is a lightweight Windows system tray app that monitors your Bac
 ## Get Started in 2 Minutes
 1. Run `BackrestTrayWatcher.exe`.
 2. Find the app icon in the system tray (bottom-right corner of the taskbar).
-3. Right-click the icon and choose `Set log file path...` (eg. C:\Users\[YOUR_USERNAME]\AppData\Roaming\backrest\data\processlogs\backrest.log)
+3. Right-click the icon and choose `Set log file path...` (eg. C:\Users\(YOUR_USERNAME)\AppData\Roaming\backrest\data\processlogs\backrest.log)
 4. Select your Backrest log file.
 5. Done. The app will monitor in the background.
 
@@ -47,4 +47,5 @@ Use `Acknowledge warning/error`.
 
 ## Note
 The config file `backrest_tray_watcher.ini` is created/updated automatically in the same folder as the executable.
+
 
