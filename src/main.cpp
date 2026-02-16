@@ -920,7 +920,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
       if (trayEvent == WM_RBUTTONUP || trayEvent == WM_CONTEXTMENU || trayEvent == NIN_KEYSELECT) {
         ShowTrayContextMenu(hwnd);
       } else if (trayEvent == WM_LBUTTONDBLCLK) {
-        AcknowledgeAlert();
+        OpenLogFile();
       }
       return 0;
     }
