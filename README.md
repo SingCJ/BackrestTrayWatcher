@@ -1,6 +1,6 @@
 ﻿# Backrest Watcher
 
-Backrest Watcher is a lightweight Windows system tray app that monitors your Backrest log and alerts you when warnings or errors appear.
+Backrest Watcher is a lightweight Windows system tray app that monitors your Backrest log and alerts when new log content contains the keyword `"logger":`.
 
 ## Who is this for?
 - You are running Backrest and want to know immediately when something goes wrong.
@@ -14,6 +14,7 @@ Backrest Watcher is a lightweight Windows system tray app that monitors your Bac
 5. Done. The app will monitor in the background.
 
 ## Daily Usage
+- Double-left-click tray icon: acknowledge current alert.
 - `Open log file`: open the log to inspect details.
 - `Open log folder`: open the folder containing the log file.
 - `Set check interval...`: change how often the app checks the log.
@@ -21,14 +22,14 @@ Backrest Watcher is a lightweight Windows system tray app that monitors your Bac
 - `Exit`: close the app.
 
 ## Tray Status Meaning
-- `OK`: no new warning/error found.
-- `WARNING/ERROR` (blinking): a new warning/error was detected.
+- `OK`: no new `"logger":` keyword found.
+- `WARNING/ERROR` (blinking): a new `"logger":` keyword was detected.
 
 ## What to do when an alert appears
 1. Right-click the tray icon and click `Open log file`.
-2. Check the latest warning/error lines.
+2. Check the latest lines containing `"logger":`.
 3. Fix the issue in Backrest.
-4. Return to the app and click `Acknowledge warning/error`.
+4. Return to the app and double-left-click the tray icon (or click `Acknowledge warning/error` from menu).
 
 ## Usage Tips
 - Keep the app running during your Windows session so you do not miss alerts.
@@ -43,10 +44,7 @@ That is expected. The app runs in the system tray and has no main window.
 Click the `^` arrow in the tray area to show hidden icons.
 
 ### 3. How do I reset the current alert state?
-Use `Acknowledge warning/error`.
+Double-left-click tray icon or use `Acknowledge warning/error`.
 
 ## Note
 The config file `backrest_tray_watcher.ini` is created/updated automatically in the same folder as the executable.
-
-
-
