@@ -24,6 +24,7 @@ constexpr UINT kBlinkIntervalMs = 500;
 constexpr UINT kMinMonitorIntervalMs = 500;
 constexpr double kMinMonitorIntervalSeconds = static_cast<double>(kMinMonitorIntervalMs) / 1000.0;
 constexpr double kMaxTimerSupportedSeconds = static_cast<double>((std::numeric_limits<UINT>::max)()) / 1000.0;
+constexpr wchar_t kSingleInstanceMutexName[] = L"Local\\BackrestTrayWatcher.Singleton";
 
 constexpr UINT kMenuSetLogPath = 1001;
 constexpr UINT kMenuOpenLogFolder = 1002;
@@ -45,6 +46,9 @@ struct AppState {
   HICON normalIcon = nullptr;
   HICON alertIcon = nullptr;
   bool ownsNormalIcon = false;
+  bool trayIconAdded = false;
+  HANDLE singleInstanceMutex = nullptr;
+  UINT taskbarCreatedMessage = 0;
 };
 
 AppState g_state;
@@ -207,14 +211,56 @@ void LoadLogPathFromConfig() {
   LoadAcknowledgedOffsetFromConfig();
 }
 
-void UpdateTrayIcon() {
+bool AcquireSingleInstanceLock(bool* alreadyRunning) {
+  if (alreadyRunning) {
+    *alreadyRunning = false;
+  }
+
+  g_state.singleInstanceMutex = CreateMutexW(nullptr, FALSE, kSingleInstanceMutexName);
+  if (!g_state.singleInstanceMutex) {
+    return false;
+  }
+
+  if (GetLastError() == ERROR_ALREADY_EXISTS && alreadyRunning) {
+    *alreadyRunning = true;
+  }
+
+  return true;
+}
+
+void ReleaseSingleInstanceLock() {
+  if (g_state.singleInstanceMutex) {
+    CloseHandle(g_state.singleInstanceMutex);
+    g_state.singleInstanceMutex = nullptr;
+  }
+}
+
+void RefreshTrayIconVisualState() {
   std::wstring tip = L"Backrest Watcher: ";
   tip += g_state.hasAlert ? L"WARNING/ERROR" : L"OK";
 
   StringCchCopyW(g_state.trayIcon.szTip, ARRAYSIZE(g_state.trayIcon.szTip), tip.c_str());
   g_state.trayIcon.hIcon = (g_state.hasAlert && g_state.blinkShowAlertIcon) ? g_state.alertIcon : g_state.normalIcon;
+}
+
+bool AddTrayIcon() {
+  RefreshTrayIconVisualState();
+  g_state.trayIcon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+  if (!Shell_NotifyIconW(NIM_ADD, &g_state.trayIcon)) {
+    return false;
+  }
+  g_state.trayIconAdded = true;
+  g_state.trayIcon.uVersion = NOTIFYICON_VERSION_4;
+  Shell_NotifyIconW(NIM_SETVERSION, &g_state.trayIcon);
+  return true;
+}
+
+void UpdateTrayIcon() {
+  RefreshTrayIconVisualState();
   g_state.trayIcon.uFlags = NIF_ICON | NIF_TIP;
-  Shell_NotifyIconW(NIM_MODIFY, &g_state.trayIcon);
+  if (!Shell_NotifyIconW(NIM_MODIFY, &g_state.trayIcon)) {
+    AddTrayIcon();
+  }
 }
 
 void ResetWatcherAndRescan() {
@@ -437,7 +483,7 @@ LRESULT CALLBACK IntervalInputWindowProc(HWND hwnd, UINT message, WPARAM wParam,
         while (parseEnd != nullptr && *parseEnd != L'\0' && iswspace(*parseEnd) != 0) {
           ++parseEnd;
         }
-        if (parseEnd == valueBuffer || (parseEnd != nullptr && *parseEnd != L'\0')) {
+        if (parseEnd == valueBuffer || (parseEnd != nullptr && *parseEnd != L'\0') || !std::isfinite(baseValue)) {
           MessageBoxW(hwnd, L"Invalid value. Enter a numeric interval.", L"Backrest Watcher", MB_ICONWARNING | MB_OK);
           SetFocus(state->editControl);
           return 0;
@@ -445,7 +491,7 @@ LRESULT CALLBACK IntervalInputWindowProc(HWND hwnd, UINT message, WPARAM wParam,
 
         const bool useMinutes = (SendMessageW(state->minutesCheckbox, BM_GETCHECK, 0, 0) == BST_CHECKED);
         double intervalSeconds = useMinutes ? (baseValue * 60.0) : baseValue;
-        if (intervalSeconds < kMinMonitorIntervalSeconds) {
+        if (!std::isfinite(intervalSeconds) || intervalSeconds < kMinMonitorIntervalSeconds) {
           MessageBoxW(hwnd, L"Value must be at least 0.5 seconds.", L"Backrest Watcher", MB_ICONWARNING | MB_OK);
           SetFocus(state->editControl);
           return 0;
@@ -524,14 +570,23 @@ bool PromptMonitorIntervalMs(HWND parent, UINT currentValueMs, UINT* outValueMs)
 
   EnableWindow(parent, FALSE);
   MSG msg = {};
-  while (IsWindow(dialog) && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+  BOOL getMessageResult = 0;
+  while (IsWindow(dialog) && (getMessageResult = GetMessageW(&msg, nullptr, 0, 0)) > 0) {
     if (!IsDialogMessageW(dialog, &msg)) {
       TranslateMessage(&msg);
       DispatchMessageW(&msg);
     }
   }
+  const bool receivedQuit = (getMessageResult == 0);
+  if (receivedQuit && IsWindow(dialog)) {
+    DestroyWindow(dialog);
+  }
   EnableWindow(parent, TRUE);
   SetForegroundWindow(parent);
+  if (receivedQuit) {
+    PostQuitMessage(static_cast<int>(msg.wParam));
+    return false;
+  }
 
   if (!state.accepted) {
     return false;
@@ -625,18 +680,15 @@ bool InitializeTrayIcon(HWND hwnd) {
   g_state.trayIcon.hWnd = hwnd;
   g_state.trayIcon.uID = kTrayIconId;
   g_state.trayIcon.uCallbackMessage = kTrayMessage;
-  g_state.trayIcon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-  g_state.trayIcon.hIcon = g_state.normalIcon;
-  StringCchCopyW(g_state.trayIcon.szTip, ARRAYSIZE(g_state.trayIcon.szTip), L"Backrest Watcher");
-
-  if (!Shell_NotifyIconW(NIM_ADD, &g_state.trayIcon)) {
-    return false;
-  }
-
-  return true;
+  return AddTrayIcon();
 }
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+  if (message == g_state.taskbarCreatedMessage && g_state.taskbarCreatedMessage != 0) {
+    AddTrayIcon();
+    return 0;
+  }
+
   switch (message) {
     case WM_TIMER:
       if (wParam == kMonitorTimerId) {
@@ -688,7 +740,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
     case WM_DESTROY:
       KillTimer(hwnd, kMonitorTimerId);
       KillTimer(hwnd, kBlinkTimerId);
-      Shell_NotifyIconW(NIM_DELETE, &g_state.trayIcon);
+      if (g_state.trayIconAdded) {
+        Shell_NotifyIconW(NIM_DELETE, &g_state.trayIcon);
+        g_state.trayIconAdded = false;
+      }
       if (g_state.ownsNormalIcon && g_state.normalIcon) {
         DestroyIcon(g_state.normalIcon);
         g_state.normalIcon = nullptr;
@@ -705,6 +760,17 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+  bool alreadyRunning = false;
+  if (!AcquireSingleInstanceLock(&alreadyRunning)) {
+    MessageBoxW(nullptr, L"Failed to initialize single-instance lock.", L"Backrest Watcher", MB_ICONERROR | MB_OK);
+    return 1;
+  }
+  if (alreadyRunning) {
+    ReleaseSingleInstanceLock();
+    return 0;
+  }
+
+  g_state.taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
   g_state.configPath = ConfigFilePath();
   LoadLogPathFromConfig();
 
@@ -718,6 +784,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
   if (!RegisterClassExW(&windowClass)) {
     MessageBoxW(nullptr, L"Failed to register window class.", L"Backrest Watcher", MB_ICONERROR | MB_OK);
+    ReleaseSingleInstanceLock();
     return 1;
   }
 
@@ -737,6 +804,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
   if (!hwnd) {
     MessageBoxW(nullptr, L"Failed to create hidden window.", L"Backrest Watcher", MB_ICONERROR | MB_OK);
+    ReleaseSingleInstanceLock();
     return 1;
   }
 
@@ -745,17 +813,20 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   if (!InitializeTrayIcon(hwnd)) {
     MessageBoxW(hwnd, L"Failed to add tray icon.", L"Backrest Watcher", MB_ICONERROR | MB_OK);
     DestroyWindow(hwnd);
+    ReleaseSingleInstanceLock();
     return 1;
   }
 
   if (SetTimer(hwnd, kMonitorTimerId, g_state.monitorIntervalMs, nullptr) == 0) {
     MessageBoxW(hwnd, L"Failed to start log monitoring timer.", L"Backrest Watcher", MB_ICONERROR | MB_OK);
     DestroyWindow(hwnd);
+    ReleaseSingleInstanceLock();
     return 1;
   }
   if (SetTimer(hwnd, kBlinkTimerId, kBlinkIntervalMs, nullptr) == 0) {
     MessageBoxW(hwnd, L"Failed to start icon blinking timer.", L"Backrest Watcher", MB_ICONERROR | MB_OK);
     DestroyWindow(hwnd);
+    ReleaseSingleInstanceLock();
     return 1;
   }
   ResetWatcherAndRescan();
@@ -769,5 +840,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     DispatchMessageW(&message);
   }
 
+  ReleaseSingleInstanceLock();
   return static_cast<int>(message.wParam);
 }
