@@ -40,6 +40,7 @@ constexpr UINT kMenuOpenLogFile = 1003;
 constexpr UINT kMenuAcknowledgeAlert = 1004;
 constexpr UINT kMenuExit = 1005;
 constexpr UINT kMenuOpenAlertMessages = 1006;
+constexpr UINT kMenuOpenDashboard = 1007;
 constexpr UINT kMenuSetMonitorInterval = 1101;
 constexpr UINT kMenuSetDoubleClickAction = 1102;
 constexpr UINT_PTR kAcknowledgePopupTimerId = 3;
@@ -60,6 +61,9 @@ constexpr wchar_t kAlertManagerWindowClassName[] = L"BackrestWatcherAlertManager
 constexpr wchar_t kDoubleClickActionDialogClassName[] = L"BackrestWatcherDoubleClickActionWindowClass";
 constexpr wchar_t kIgnoreFileName[] = L"Ignore.txt";
 constexpr wchar_t kDebugLogFileName[] = L"debuglog.txt";
+constexpr wchar_t kAppVersion[] = L"1.1.0";
+constexpr wchar_t kAppTitle[] = L"Backrest Watcher 1.1.0";
+constexpr wchar_t kDefaultDashboardUrl[] = L"http://localhost:9898";
 constexpr int kAlertManagerWindowWidth = 760;
 constexpr int kAlertManagerWindowHeight = 520;
 constexpr int kHiddenOwnerWindowWidth = 360;
@@ -81,6 +85,7 @@ constexpr wchar_t kIgnoreUsageHintText[] =
     L"- After editing Ignore.txt manually, click Refresh list.";
 constexpr UINT kAlertManagerTabMessages = 0;
 constexpr UINT kAlertManagerTabIgnored = 1;
+constexpr UINT kAlertManagerTabSettings = 2;
 constexpr int kControlAlertTab = 2001;
 constexpr int kControlActiveAlertsList = 2002;
 constexpr int kControlActiveAlertsDetails = 2003;
@@ -90,6 +95,10 @@ constexpr int kControlIgnoredAlertsDetails = 2006;
 constexpr int kControlRefreshIgnoredButton = 2007;
 constexpr int kControlOpenIgnoreFileButton = 2008;
 constexpr int kControlIgnoreUsageHint = 2009;
+constexpr int kControlDashboardUrlLabel = 2010;
+constexpr int kControlDashboardUrlEdit = 2011;
+constexpr int kControlSaveDashboardUrlButton = 2012;
+constexpr int kControlOpenDashboardButton = 2013;
 constexpr int kControlDoubleClickActionCombo = 2101;
 
 enum class AlertSeverity {
@@ -100,6 +109,7 @@ enum class AlertSeverity {
 
 enum class DoubleClickAction : UINT {
   kOpenAlertMessages = kMenuOpenAlertMessages,
+  kOpenDashboard = kMenuOpenDashboard,
   kSetLogPath = kMenuSetLogPath,
   kSetMonitorInterval = kMenuSetMonitorInterval,
   kOpenLogFolder = kMenuOpenLogFolder,
@@ -132,6 +142,7 @@ struct AppState {
   std::wstring ignorePath;
   std::wstring debugLogPath;
   std::wstring logPath;
+  std::wstring dashboardUrl = kDefaultDashboardUrl;
   ULONGLONG acknowledgedOffset = 0;
   ULONGLONG lastOffset = 0;
   ULONGLONG lastLineNumber = 0;
@@ -159,6 +170,10 @@ struct AppState {
   HWND refreshIgnoredButtonHwnd = nullptr;
   HWND openIgnoreFileButtonHwnd = nullptr;
   HWND ignoreUsageHintHwnd = nullptr;
+  HWND dashboardUrlLabelHwnd = nullptr;
+  HWND dashboardUrlEditHwnd = nullptr;
+  HWND saveDashboardUrlButtonHwnd = nullptr;
+  HWND openDashboardButtonHwnd = nullptr;
   HANDLE singleInstanceMutex = nullptr;
   UINT taskbarCreatedMessage = 0;
   std::vector<IgnoreRule> ignoredRules;
@@ -464,6 +479,8 @@ const wchar_t* DoubleClickActionLabel(DoubleClickAction action) {
   switch (action) {
     case DoubleClickAction::kOpenAlertMessages:
       return L"Open alert messages";
+    case DoubleClickAction::kOpenDashboard:
+      return L"Open dashboard";
     case DoubleClickAction::kSetLogPath:
       return L"Set log file path";
     case DoubleClickAction::kSetMonitorInterval:
@@ -483,6 +500,8 @@ const wchar_t* DoubleClickActionConfigValue(DoubleClickAction action) {
   switch (action) {
     case DoubleClickAction::kOpenAlertMessages:
       return L"open_alert_messages";
+    case DoubleClickAction::kOpenDashboard:
+      return L"open_dashboard";
     case DoubleClickAction::kSetLogPath:
       return L"set_log_path";
     case DoubleClickAction::kSetMonitorInterval:
@@ -504,6 +523,10 @@ bool TryParseDoubleClickAction(const wchar_t* value, DoubleClickAction* outActio
   }
   if (lstrcmpiW(value, L"open_alert_messages") == 0) {
     *outAction = DoubleClickAction::kOpenAlertMessages;
+    return true;
+  }
+  if (lstrcmpiW(value, L"open_dashboard") == 0) {
+    *outAction = DoubleClickAction::kOpenDashboard;
     return true;
   }
   if (lstrcmpiW(value, L"set_log_path") == 0) {
@@ -531,6 +554,7 @@ bool TryParseDoubleClickAction(const wchar_t* value, DoubleClickAction* outActio
 
 constexpr DoubleClickAction kDoubleClickActionOptions[] = {
     DoubleClickAction::kOpenAlertMessages,
+    DoubleClickAction::kOpenDashboard,
     DoubleClickAction::kOpenLogFile,
     DoubleClickAction::kOpenLogFolder,
     DoubleClickAction::kAcknowledgeAlert,
@@ -1235,7 +1259,7 @@ AlertSeverity AlertSeverityFromLine(std::string_view line) {
   if (line.find(kWarnLevelKeyword) != std::string_view::npos) {
     return AlertSeverity::kWarning;
   }
-  return AlertSeverity::kWarning;
+  return AlertSeverity::kNone;
 }
 
 bool TryBuildAlertEntryFromLine(std::string_view line, AlertEntry* outEntry) {
@@ -1361,6 +1385,33 @@ AlertSeverity ScanFileRangeForAlertEntries(
 
 void SaveLogPathToConfig(const std::wstring& logPath) {
   WritePrivateProfileStringW(L"watcher", L"log_path", logPath.c_str(), g_state.configPath.c_str());
+}
+
+bool IsSupportedDashboardUrl(const std::wstring& url) {
+  return url.rfind(L"http://", 0) == 0 || url.rfind(L"https://", 0) == 0;
+}
+
+void SaveDashboardUrlToConfig(const std::wstring& dashboardUrl) {
+  WritePrivateProfileStringW(L"watcher", L"dashboard_url", dashboardUrl.c_str(), g_state.configPath.c_str());
+}
+
+void LoadDashboardUrlFromConfig() {
+  wchar_t dashboardUrlBuffer[4096] = {};
+  const DWORD charsRead = GetPrivateProfileStringW(
+      L"watcher",
+      L"dashboard_url",
+      L"",
+      dashboardUrlBuffer,
+      static_cast<DWORD>(ARRAYSIZE(dashboardUrlBuffer)),
+      g_state.configPath.c_str());
+
+  if (charsRead > 0 && IsSupportedDashboardUrl(dashboardUrlBuffer)) {
+    g_state.dashboardUrl = dashboardUrlBuffer;
+    return;
+  }
+
+  g_state.dashboardUrl = kDefaultDashboardUrl;
+  SaveDashboardUrlToConfig(g_state.dashboardUrl);
 }
 
 UINT ClampMonitorInterval(UINT intervalMs) {
@@ -1553,6 +1604,7 @@ void LoadLogPathFromConfig() {
   }
 
   LoadMonitorIntervalFromConfig();
+  LoadDashboardUrlFromConfig();
   LoadDoubleClickActionFromConfig();
   LoadAcknowledgePopupDurationFromConfig();
   LoadAcknowledgedOffsetFromConfig();
@@ -1560,6 +1612,7 @@ void LoadLogPathFromConfig() {
   DebugLog(
       L"Config loaded. logPath=" + g_state.logPath +
       L", monitorIntervalMs=" + std::to_wstring(g_state.monitorIntervalMs) +
+      L", dashboardUrl=" + g_state.dashboardUrl +
       L", useMinutes=" + std::to_wstring(g_state.monitorIntervalUseMinutes ? 1 : 0) +
       L", doubleClickAction=" + DoubleClickActionLabel(g_state.doubleClickAction) +
       L", acknowledgedOffset=" + std::to_wstring(g_state.acknowledgedOffset));
@@ -1718,7 +1771,7 @@ void ReleaseSingleInstanceLock() {
 }
 
 void RefreshTrayIconVisualState() {
-  std::wstring tip = L"Backrest Watcher: ";
+  std::wstring tip = std::wstring(kAppTitle) + L": ";
   HICON icon = g_state.normalIcon;
   switch (g_state.alertSeverity) {
     case AlertSeverity::kWarning:
@@ -2111,7 +2164,7 @@ void MonitorLogFileOnce() {
           g_state.activeAlertEntries.end(),
           std::make_move_iterator(newEntries.begin()),
           std::make_move_iterator(newEntries.end()));
-        needAlertWindowRefresh = true;
+      needAlertWindowRefresh = true;
       }
       g_state.lastOffset = newSize;
       g_state.lastLineNumber = endingLineNumber;
@@ -2156,6 +2209,14 @@ void OpenLogFile() {
   const HINSTANCE result = ShellExecuteW(nullptr, L"open", g_state.logPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
   if (reinterpret_cast<INT_PTR>(result) <= 32) {
     MessageBoxW(g_state.hwnd, L"Cannot open log file.", L"Backrest Watcher", MB_ICONERROR | MB_OK);
+  }
+}
+
+void OpenDashboard() {
+  DebugLog(L"OpenDashboard requested. url=" + g_state.dashboardUrl);
+  const HINSTANCE result = ShellExecuteW(nullptr, L"open", g_state.dashboardUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+  if (reinterpret_cast<INT_PTR>(result) <= 32) {
+    MessageBoxW(g_state.hwnd, L"Cannot open dashboard.", L"Backrest Watcher", MB_ICONERROR | MB_OK);
   }
 }
 
@@ -2731,20 +2792,26 @@ void UpdateAlertManagerVisibleTab() {
   }
 
   const int currentTab = TabCtrl_GetCurSel(g_state.alertManagerTabHwnd);
-  const BOOL showMessages = (currentTab != static_cast<int>(kAlertManagerTabIgnored)) ? TRUE : FALSE;
+  const BOOL showSettings = (currentTab == static_cast<int>(kAlertManagerTabSettings)) ? TRUE : FALSE;
+  const BOOL showIgnored = (currentTab == static_cast<int>(kAlertManagerTabIgnored)) ? TRUE : FALSE;
+  const BOOL showMessages = (!showIgnored && !showSettings) ? TRUE : FALSE;
 
   ShowWindow(g_state.activeAlertsListHwnd, showMessages ? SW_SHOW : SW_HIDE);
   ShowWindow(g_state.activeAlertsDetailsHwnd, showMessages ? SW_SHOW : SW_HIDE);
   ShowWindow(g_state.ignoreSelectedButtonHwnd, showMessages ? SW_SHOW : SW_HIDE);
-  ShowWindow(g_state.ignoredAlertsListHwnd, showMessages ? SW_HIDE : SW_SHOW);
-  ShowWindow(g_state.ignoredAlertsDetailsHwnd, showMessages ? SW_HIDE : SW_SHOW);
-  ShowWindow(g_state.refreshIgnoredButtonHwnd, showMessages ? SW_HIDE : SW_SHOW);
-  ShowWindow(g_state.openIgnoreFileButtonHwnd, showMessages ? SW_HIDE : SW_SHOW);
-  ShowWindow(g_state.ignoreUsageHintHwnd, showMessages ? SW_HIDE : SW_SHOW);
+  ShowWindow(g_state.ignoredAlertsListHwnd, showIgnored ? SW_SHOW : SW_HIDE);
+  ShowWindow(g_state.ignoredAlertsDetailsHwnd, showIgnored ? SW_SHOW : SW_HIDE);
+  ShowWindow(g_state.refreshIgnoredButtonHwnd, showIgnored ? SW_SHOW : SW_HIDE);
+  ShowWindow(g_state.openIgnoreFileButtonHwnd, showIgnored ? SW_SHOW : SW_HIDE);
+  ShowWindow(g_state.ignoreUsageHintHwnd, showIgnored ? SW_SHOW : SW_HIDE);
+  ShowWindow(g_state.dashboardUrlLabelHwnd, showSettings ? SW_SHOW : SW_HIDE);
+  ShowWindow(g_state.dashboardUrlEditHwnd, showSettings ? SW_SHOW : SW_HIDE);
+  ShowWindow(g_state.saveDashboardUrlButtonHwnd, showSettings ? SW_SHOW : SW_HIDE);
+  ShowWindow(g_state.openDashboardButtonHwnd, showSettings ? SW_SHOW : SW_HIDE);
 
   if (showMessages) {
     UpdateActiveAlertsSelectionDetails();
-  } else {
+  } else if (showIgnored) {
     UpdateIgnoredAlertsSelectionDetails();
   }
 }
@@ -2786,6 +2853,13 @@ void LayoutAlertManagerControls() {
       0,
       listHeight - ((kAlertManagerButtonHeight * 2) + (kAlertManagerButtonSpacingPx * 2)));
   const int detailsY = tabContentRect.top + listHeight + kAlertManagerPaddingPx;
+  const int settingsLabelWidth = 110;
+  const int settingsButtonWidth = 90;
+  const int settingsEditX = tabContentRect.left + settingsLabelWidth + kAlertManagerButtonSpacingPx;
+  const int settingsButtonY = tabContentRect.top + kAlertManagerButtonHeight + kAlertManagerButtonSpacingPx;
+  const int settingsEditWidth = (std::max)(
+      120,
+      contentWidth - settingsLabelWidth - kAlertManagerButtonSpacingPx);
 
   SetWindowPos(
       g_state.activeAlertsListHwnd,
@@ -2850,6 +2924,38 @@ void LayoutAlertManagerControls() {
       detailsY,
       contentWidth,
       detailsHeight,
+      SWP_NOZORDER);
+  SetWindowPos(
+      g_state.dashboardUrlLabelHwnd,
+      nullptr,
+      tabContentRect.left,
+      tabContentRect.top + 4,
+      settingsLabelWidth,
+      kAlertManagerButtonHeight,
+      SWP_NOZORDER);
+  SetWindowPos(
+      g_state.dashboardUrlEditHwnd,
+      nullptr,
+      settingsEditX,
+      tabContentRect.top,
+      settingsEditWidth,
+      kAlertManagerButtonHeight,
+      SWP_NOZORDER);
+  SetWindowPos(
+      g_state.saveDashboardUrlButtonHwnd,
+      nullptr,
+      settingsEditX,
+      settingsButtonY,
+      settingsButtonWidth,
+      kAlertManagerButtonHeight,
+      SWP_NOZORDER);
+  SetWindowPos(
+      g_state.openDashboardButtonHwnd,
+      nullptr,
+      settingsEditX + settingsButtonWidth + kAlertManagerButtonSpacingPx,
+      settingsButtonY,
+      settingsButtonWidth,
+      kAlertManagerButtonHeight,
       SWP_NOZORDER);
 }
 
@@ -2961,6 +3067,28 @@ void RefreshIgnoreListFromDisk() {
   ResetWatcherAndRescan();
 }
 
+bool SaveDashboardUrlFromSettings() {
+  const int textLength = GetWindowTextLengthW(g_state.dashboardUrlEditHwnd);
+  std::wstring dashboardUrl(static_cast<size_t>((std::max)(0, textLength)) + 1, L'\0');
+  if (textLength > 0) {
+    GetWindowTextW(g_state.dashboardUrlEditHwnd, dashboardUrl.data(), textLength + 1);
+  }
+  dashboardUrl.resize(static_cast<size_t>((std::max)(0, textLength)));
+
+  if (!IsSupportedDashboardUrl(dashboardUrl)) {
+    MessageBoxW(
+        g_state.alertManagerHwnd,
+        L"Dashboard URL must start with http:// or https://.",
+        L"Backrest Watcher",
+        MB_ICONWARNING | MB_OK);
+    return false;
+  }
+
+  g_state.dashboardUrl = dashboardUrl;
+  SaveDashboardUrlToConfig(g_state.dashboardUrl);
+  return true;
+}
+
 LRESULT CALLBACK AlertManagerWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
   DebugLogWindowMessage(L"AlertManagerWindow", message, wParam, lParam);
   switch (message) {
@@ -2989,6 +3117,11 @@ LRESULT CALLBACK AlertManagerWindowProc(HWND hwnd, UINT message, WPARAM wParam, 
       ignoredItem.mask = TCIF_TEXT;
       ignoredItem.pszText = const_cast<LPWSTR>(L"Ignore list");
       TabCtrl_InsertItem(g_state.alertManagerTabHwnd, static_cast<int>(kAlertManagerTabIgnored), &ignoredItem);
+
+      TCITEMW settingsItem = {};
+      settingsItem.mask = TCIF_TEXT;
+      settingsItem.pszText = const_cast<LPWSTR>(L"Settings");
+      TabCtrl_InsertItem(g_state.alertManagerTabHwnd, static_cast<int>(kAlertManagerTabSettings), &settingsItem);
 
       g_state.activeAlertsListHwnd = CreateWindowExW(
           WS_EX_CLIENTEDGE,
@@ -3096,6 +3229,59 @@ LRESULT CALLBACK AlertManagerWindowProc(HWND hwnd, UINT message, WPARAM wParam, 
           nullptr,
           nullptr);
 
+      g_state.dashboardUrlLabelHwnd = CreateWindowExW(
+          0,
+          L"STATIC",
+          L"Dashboard URL",
+          WS_CHILD | WS_VISIBLE,
+          0,
+          0,
+          0,
+          0,
+          hwnd,
+          MenuHandleFromId(kControlDashboardUrlLabel),
+          nullptr,
+          nullptr);
+      g_state.dashboardUrlEditHwnd = CreateWindowExW(
+          WS_EX_CLIENTEDGE,
+          L"EDIT",
+          g_state.dashboardUrl.c_str(),
+          WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+          0,
+          0,
+          0,
+          0,
+          hwnd,
+          MenuHandleFromId(kControlDashboardUrlEdit),
+          nullptr,
+          nullptr);
+      g_state.saveDashboardUrlButtonHwnd = CreateWindowExW(
+          0,
+          L"BUTTON",
+          L"Save",
+          WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+          0,
+          0,
+          0,
+          0,
+          hwnd,
+          MenuHandleFromId(kControlSaveDashboardUrlButton),
+          nullptr,
+          nullptr);
+      g_state.openDashboardButtonHwnd = CreateWindowExW(
+          0,
+          L"BUTTON",
+          L"Open",
+          WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+          0,
+          0,
+          0,
+          0,
+          hwnd,
+          MenuHandleFromId(kControlOpenDashboardButton),
+          nullptr,
+          nullptr);
+
       LayoutAlertManagerControls();
       RefreshAlertManagerWindowContent();
       return 0;
@@ -3136,6 +3322,14 @@ LRESULT CALLBACK AlertManagerWindowProc(HWND hwnd, UINT message, WPARAM wParam, 
         case kControlOpenIgnoreFileButton:
           OpenIgnoreListFile();
           return 0;
+        case kControlSaveDashboardUrlButton:
+          SaveDashboardUrlFromSettings();
+          return 0;
+        case kControlOpenDashboardButton:
+          if (SaveDashboardUrlFromSettings()) {
+            OpenDashboard();
+          }
+          return 0;
         default:
           return DefWindowProcW(hwnd, message, wParam, lParam);
       }
@@ -3155,6 +3349,10 @@ LRESULT CALLBACK AlertManagerWindowProc(HWND hwnd, UINT message, WPARAM wParam, 
       g_state.refreshIgnoredButtonHwnd = nullptr;
       g_state.openIgnoreFileButtonHwnd = nullptr;
       g_state.ignoreUsageHintHwnd = nullptr;
+      g_state.dashboardUrlLabelHwnd = nullptr;
+      g_state.dashboardUrlEditHwnd = nullptr;
+      g_state.saveDashboardUrlButtonHwnd = nullptr;
+      g_state.openDashboardButtonHwnd = nullptr;
       return 0;
 
     default:
@@ -3208,7 +3406,7 @@ void ShowAlertManagerWindow() {
   HWND alertWindow = CreateWindowExW(
       0,
       kAlertManagerWindowClassName,
-      L"Backrest Watcher Alerts",
+      kAppTitle,
       WS_OVERLAPPEDWINDOW,
       alertWindowPosition.x,
       alertWindowPosition.y,
@@ -3309,6 +3507,8 @@ void ShowTrayContextMenu(HWND hwnd) {
   AppendMenuW(menu, MF_STRING, kMenuOpenLogFile, L"Open log file");
   AppendMenuW(menu, MF_STRING, kMenuAcknowledgeAlert, L"Acknowledge warning/error");
   AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING, kMenuOpenDashboard, L"Open dashboard");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(menu, MF_STRING, kMenuExit, L"Exit");
 
   POINT cursorPos = {};
@@ -3333,6 +3533,9 @@ bool HandleCommand(UINT commandId) {
       return true;
     case kMenuOpenAlertMessages:
       ShowAlertManagerWindow();
+      return true;
+    case kMenuOpenDashboard:
+      OpenDashboard();
       return true;
     case kMenuOpenLogFolder:
       OpenLogFolder();
@@ -3492,7 +3695,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   HWND hwnd = CreateWindowExW(
       0,
       kWindowClassName,
-      L"Backrest Watcher",
+      kAppTitle,
       WS_OVERLAPPEDWINDOW,
       hiddenOwnerWindowPosition.x,
       hiddenOwnerWindowPosition.y,
